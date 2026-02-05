@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Nash Social Welfare (NSW) Maximization with Trust-Based Malicious Agent Detection
-VERSION 2: Uses Water Filling Allocation (as per paper)
+VERSION 2:
 
 This code implements an online resource allocation algorithm that maximizes Nash Social Welfare
 while detecting and mitigating malicious agents who report distorted valuations.
@@ -508,8 +508,8 @@ def online_set_aside_with_trust(v_true, reports_func_for_malicious, detect_fn,
         marginal_util = np.zeros(N_all)
         # Marginal utility determines water filling allocation
         
-        # Compute marginal utilities (may crash if predicted_util is zero)
-        denom = predicted_util.copy()
+        # Compute marginal utilities (avoid division by zero for stability with any report stream)
+        denom = np.maximum(predicted_util.copy(), 1e-10)
         marginal_util[eligible] = reported_round[eligible] / denom[eligible]
         # Marginal utility formula: marginal_util[i] = reported_value[i] / predicted_util[i]
         # This is the derivative of log utility: d/dx log(u_i) = v[i] / u[i]
@@ -552,7 +552,7 @@ def online_set_aside_with_trust(v_true, reports_func_for_malicious, detect_fn,
             elif n_eligible_actual == 1:
                 # Single eligible agent gets all 0.5
                 y[eligible_indices[0], t] = 0.5
-        else:
+            else:
                 # True water filling algorithm (iterative equalization)
                 # Extract values for eligible agents
                 eligible_predicted = predicted_util[eligible_indices].copy()
@@ -809,7 +809,7 @@ def detect_malicious_from_reports(reports_history, xi0=0.1, gamma=0.7):
 # MALICIOUS REPORTING FUNCTION
 # ============================================================================
 
-def malicious_report_func_factory(v_true, c_mal, mal_indices):
+def malicious_report_func_factory(v_true, c_mal, mal_indices, seed=None):
     """
     Factory function that creates a malicious reporting function.
     
@@ -835,13 +835,14 @@ def malicious_report_func_factory(v_true, c_mal, mal_indices):
                Distortion multiplier (higher = more extreme distortion)
         mal_indices: list or array
                      Indices of malicious agents
+        seed: int, optional
+              If provided, fixes the random stream so version 1 and 2 see the same reports (fair comparison).
     
     Returns:
         reports_func: function(i, t, v_true_inner) → reported value
     """
-    rng = np.random.RandomState()
-    # Local random number generator
-    # Ensures each trial gets independent randomness
+    rng = np.random.RandomState(seed) if seed is not None else np.random.RandomState()
+    # Seeded RNG when seed given → same dataset across version 1 and 2
 
     def reports_func(i, t, v_true_inner):
         """
@@ -875,7 +876,7 @@ def malicious_report_func_factory(v_true, c_mal, mal_indices):
 # ============================================================================
 
 def run_experiment_once(N_trust, N_mal, T, c_mal, detection_fn, 
-                        xi0_param=None, gamma_param=None, v_true_precomputed=None):
+                        xi0_param=None, gamma_param=None, v_true_precomputed=None, trial=None):
     """
     Run one complete experiment trial.
     
@@ -898,6 +899,8 @@ def run_experiment_once(N_trust, N_mal, T, c_mal, detection_fn,
         v_true_precomputed: numpy array, optional, pre-generated valuation matrix
                            If provided, uses this instead of generating new random data
                            This ensures fair comparison across different xi0 values
+        trial: int, optional
+               Trial index. If provided, seeds the report factory so version 1 and 2 use the same dataset.
     
     Returns:
         Dictionary with:
@@ -956,8 +959,10 @@ def run_experiment_once(N_trust, N_mal, T, c_mal, detection_fn,
     # No malicious agents → no detection needed
     
     # Scenario B: Online Polluted WITHOUT Detection (baseline)
-    reports_func = malicious_report_func_factory(v_true, c_mal, mal_idx)
-    # Create reporting function with malicious distortion
+    report_seed_no_detect = (1000 + trial) if trial is not None else None
+    report_seed_with_detect = (2000 + trial) if trial is not None else None
+    reports_func = malicious_report_func_factory(v_true, c_mal, mal_idx, seed=report_seed_no_detect)
+    # Create reporting function with malicious distortion (seeded for fair comparison across v1/v2)
     
     u_online_all_no_detect, nsw_online_all_no_detect, detected_dummy2 = \
         online_set_aside_with_trust(
@@ -969,8 +974,8 @@ def run_experiment_once(N_trust, N_mal, T, c_mal, detection_fn,
     # trust_indices=trust_idx: only compute NSW for trustworthy agents
     
     # Scenario C: Online Polluted WITH Detection
-    reports_func2 = malicious_report_func_factory(v_true, c_mal, mal_idx)
-    # Create new reporting function (independent randomness)
+    reports_func2 = malicious_report_func_factory(v_true, c_mal, mal_idx, seed=report_seed_with_detect)
+    # Seeded so version 1 and 2 see same report stream (fair comparison)
     
     u_online_all_with_detect, nsw_online_all_with_detect, detected_mask = \
         online_set_aside_with_trust(
@@ -1048,7 +1053,7 @@ if RUN_SENSITIVITY_ANALYSIS:
                 result = run_experiment_once(
                     N_trust, N_mal, T, c_mal, detect_malicious_from_reports,
                     xi0_param=xi0_val, gamma_param=gamma,
-                    v_true_precomputed=v_true_fixed
+                    v_true_precomputed=v_true_fixed, trial=trial
                 )
                 results.append(result)
             except Exception as e:
@@ -1443,99 +1448,99 @@ else:
     print("(Set RUN_SENSITIVITY_ANALYSIS = True to run parameter sweep)")
     print()
     
-results = []
-for trial in range(n_trials):
-    if (trial + 1) % 5 == 0:
-        print(f"Running trial {trial + 1}/{n_trials}...")
-    
-    try:
-        result = run_experiment_once(N_trust, N_mal, T, c_mal, detect_malicious_from_reports)
-        results.append(result)
-    except Exception as e:
-        print(f"Error in trial {trial + 1}: {e}")
-        import traceback
-        traceback.print_exc()
-        continue
+    results = []
+    for trial in range(n_trials):
+        if (trial + 1) % 5 == 0:
+            print(f"Running trial {trial + 1}/{n_trials}...")
+        
+        try:
+            result = run_experiment_once(N_trust, N_mal, T, c_mal, detect_malicious_from_reports, trial=trial)
+            results.append(result)
+        except Exception as e:
+            print(f"Error in trial {trial + 1}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
 
-if len(results) == 0:
-    print("ERROR: No successful trials!")
-    exit(1)
+    if len(results) == 0:
+        print("ERROR: No successful trials!")
+        exit(1)
 
-# Compute statistics
-mean_offline = np.mean([r['nsw_offline'] for r in results])
-mean_online_trustonly = np.mean([r['nsw_online_trustonly'] for r in results])
-mean_online_all_no_detect = np.mean([r['nsw_online_all_no_detect'] for r in results])
-mean_online_all_with_detect = np.mean([r['nsw_online_all_with_detect'] for r in results])
+    # Compute statistics
+    mean_offline = np.mean([r['nsw_offline'] for r in results])
+    mean_online_trustonly = np.mean([r['nsw_online_trustonly'] for r in results])
+    mean_online_all_no_detect = np.mean([r['nsw_online_all_no_detect'] for r in results])
+    mean_online_all_with_detect = np.mean([r['nsw_online_all_with_detect'] for r in results])
 
-print("\n=== Summary over {} trials ===".format(n_trials))
-print("PARAMETERS:")
-print("  c_mal = {:.1f} (malicious distortion multiplier)".format(c_mal))
-print("  xi0 = {:.3f} (initial detection threshold)".format(xi0_default))
-print("  gamma = {:.1f} (threshold growth rate)".format(gamma))
-print()
-print("Offline ideal NSW (trustworthy-only)        mean: {:.6f}".format(mean_offline))
-print("Online NSW (trustworthy-only, clean)        mean: {:.6f}".format(mean_online_trustonly))
-print("Online NSW (with malicious, NO detection)  mean: {:.6f}".format(mean_online_all_no_detect))
-print("Online NSW (with malicious, WITH detection) mean: {:.6f}".format(mean_online_all_with_detect))
-print()
+    print("\n=== Summary over {} trials ===".format(n_trials))
+    print("PARAMETERS:")
+    print("  c_mal = {:.1f} (malicious distortion multiplier)".format(c_mal))
+    print("  xi0 = {:.3f} (initial detection threshold)".format(xi0_default))
+    print("  gamma = {:.1f} (threshold growth rate)".format(gamma))
+    print()
+    print("Offline ideal NSW (trustworthy-only)        mean: {:.6f}".format(mean_offline))
+    print("Online NSW (trustworthy-only, clean)        mean: {:.6f}".format(mean_online_trustonly))
+    print("Online NSW (with malicious, NO detection)  mean: {:.6f}".format(mean_online_all_no_detect))
+    print("Online NSW (with malicious, WITH detection) mean: {:.6f}".format(mean_online_all_with_detect))
+    print()
 
-print("=== Competitive Ratios (as per Note) ===")
-print()
-print("Option 1: Online vs Offline (Ideal)")
-print("  Online (clean) / Offline:        {:.3f} ({:.1f}%)".format(
-    mean_online_trustonly / (mean_offline + 1e-12), 
-    100 * mean_online_trustonly / (mean_offline + 1e-12)))
-print("  Online (malicious, no detect) / Offline:  {:.3f} ({:.1f}%)".format(
-    mean_online_all_no_detect / (mean_offline + 1e-12),
-    100 * mean_online_all_no_detect / (mean_offline + 1e-12)))
-print("  Online (malicious, with detect) / Offline: {:.3f} ({:.1f}%)".format(
-    mean_online_all_with_detect / (mean_offline + 1e-12),
-    100 * mean_online_all_with_detect / (mean_offline + 1e-12)))
-print()
+    print("=== Competitive Ratios (as per Note) ===")
+    print()
+    print("Option 1: Online vs Offline (Ideal)")
+    print("  Online (clean) / Offline:        {:.3f} ({:.1f}%)".format(
+        mean_online_trustonly / (mean_offline + 1e-12), 
+        100 * mean_online_trustonly / (mean_offline + 1e-12)))
+    print("  Online (malicious, no detect) / Offline:  {:.3f} ({:.1f}%)".format(
+        mean_online_all_no_detect / (mean_offline + 1e-12),
+        100 * mean_online_all_no_detect / (mean_offline + 1e-12)))
+    print("  Online (malicious, with detect) / Offline: {:.3f} ({:.1f}%)".format(
+        mean_online_all_with_detect / (mean_offline + 1e-12),
+        100 * mean_online_all_with_detect / (mean_offline + 1e-12)))
+    print()
 
-print("Option 2: Online (with malicious) vs Online (clean) - MEASURE POLLUTION IMPACT")
-print("  Online (malicious, no detect) / Online (clean):  {:.3f} ({:.1f}%)".format(
-    mean_online_all_no_detect / (mean_online_trustonly + 1e-12),
-    100 * mean_online_all_no_detect / (mean_online_trustonly + 1e-12)))
-print("  Online (malicious, with detect) / Online (clean): {:.3f} ({:.1f}%)".format(
-    mean_online_all_with_detect / (mean_online_trustonly + 1e-12),
-    100 * mean_online_all_with_detect / (mean_online_trustonly + 1e-12)))
-print()
+    print("Option 2: Online (with malicious) vs Online (clean) - MEASURE POLLUTION IMPACT")
+    print("  Online (malicious, no detect) / Online (clean):  {:.3f} ({:.1f}%)".format(
+        mean_online_all_no_detect / (mean_online_trustonly + 1e-12),
+        100 * mean_online_all_no_detect / (mean_online_trustonly + 1e-12)))
+    print("  Online (malicious, with detect) / Online (clean): {:.3f} ({:.1f}%)".format(
+        mean_online_all_with_detect / (mean_online_trustonly + 1e-12),
+        100 * mean_online_all_with_detect / (mean_online_trustonly + 1e-12)))
+    print()
 
-print("=== Detection Effectiveness ===")
-print("  Detection helps? Compare:")
-print("    Without detection: {:.6f}".format(mean_online_all_no_detect))
-print("    With detection:    {:.6f}".format(mean_online_all_with_detect))
-if mean_online_all_with_detect > mean_online_all_no_detect:
-    improvement = 100 * (mean_online_all_with_detect / mean_online_all_no_detect - 1)
-    print("    ✓ Detection improves by {:.1f}%".format(improvement))
-else:
-    degradation = 100 * (1 - mean_online_all_with_detect / mean_online_all_no_detect)
-    print("    ✗ Detection degrades by {:.1f}%".format(degradation))
+    print("=== Detection Effectiveness ===")
+    print("  Detection helps? Compare:")
+    print("    Without detection: {:.6f}".format(mean_online_all_no_detect))
+    print("    With detection:    {:.6f}".format(mean_online_all_with_detect))
+    if mean_online_all_with_detect > mean_online_all_no_detect:
+        improvement = 100 * (mean_online_all_with_detect / mean_online_all_no_detect - 1)
+        print("    ✓ Detection improves by {:.1f}%".format(improvement))
+    else:
+        degradation = 100 * (1 - mean_online_all_with_detect / mean_online_all_no_detect)
+        print("    ✗ Detection degrades by {:.1f}%".format(degradation))
 
-# Detection statistics
-all_detected = []
-for r in results:
-    detected_mask = r['detected_mask']
-    trust_indices = np.arange(N_trust)
-    mal_indices = np.arange(N_trust, N_trust + N_mal)
-    
-    mal_detected = detected_mask[mal_indices].sum()
-    trust_falsely_detected = detected_mask[trust_indices].sum()
-    
-    all_detected.append({
-        'mal_detected': mal_detected,
-        'trust_falsely_detected': trust_falsely_detected
-    })
+    # Detection statistics
+    all_detected = []
+    for r in results:
+        detected_mask = r['detected_mask']
+        trust_indices = np.arange(N_trust)
+        mal_indices = np.arange(N_trust, N_trust + N_mal)
+        
+        mal_detected = detected_mask[mal_indices].sum()
+        trust_falsely_detected = detected_mask[trust_indices].sum()
+        
+        all_detected.append({
+            'mal_detected': mal_detected,
+            'trust_falsely_detected': trust_falsely_detected
+        })
 
-avg_mal_detected = np.mean([d['mal_detected'] for d in all_detected])
-avg_trust_falsely_detected = np.mean([d['trust_falsely_detected'] for d in all_detected])
+    avg_mal_detected = np.mean([d['mal_detected'] for d in all_detected])
+    avg_trust_falsely_detected = np.mean([d['trust_falsely_detected'] for d in all_detected])
 
-print()
-print("=== Detection Statistics ===")
-print("  Average malicious agents detected: {:.2f} / {} ({:.1f}%)".format(
-        avg_mal_detected, N_mal, 100 * avg_mal_detected / N_mal))
-print("  Average trustworthy agents falsely detected: {:.2f} / {} ({:.1f}%)".format(
-        avg_trust_falsely_detected, N_trust, 100 * avg_trust_falsely_detected / N_trust))
-print()
-print("  Detection Rate: {:.1f}%".format(100 * avg_mal_detected / N_mal))
+    print()
+    print("=== Detection Statistics ===")
+    print("  Average malicious agents detected: {:.2f} / {} ({:.1f}%)".format(
+            avg_mal_detected, N_mal, 100 * avg_mal_detected / N_mal))
+    print("  Average trustworthy agents falsely detected: {:.2f} / {} ({:.1f}%)".format(
+            avg_trust_falsely_detected, N_trust, 100 * avg_trust_falsely_detected / N_trust))
+    print()
+    print("  Detection Rate: {:.1f}%".format(100 * avg_mal_detected / N_mal))

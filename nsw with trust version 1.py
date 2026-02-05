@@ -1,21 +1,11 @@
 #!/usr/bin/env python3
 """
 Nash Social Welfare (NSW) Maximization with Trust-Based Malicious Agent Detection
-VERSION 1: Uses Proportional Allocation
+VERSION 1: Set-Aside Greedy (Algorithm 1, Paper 1) + Center trust (Paper 2)
 
-This code implements an online resource allocation algorithm that maximizes Nash Social Welfare
-while detecting and mitigating malicious agents who report distorted valuations.
-
-Key Concepts:
-- Nash Social Welfare (NSW): Geometric mean of utilities, balancing efficiency and fairness
-- Online Algorithm: Makes decisions sequentially without knowing future valuations
-- Set-Aside Greedy: Splits resources 50/50 between uniform guarantee and greedy allocation
-- Proportional Allocation: Greedy half allocated proportionally to reported values / predicted utilities
-- Trust Detection: Uses pairwise similarity to identify malicious agents
-- Sensitivity Analysis: Evaluates algorithm robustness across parameter space
-- Fixed Dataset Approach: Ensures fair comparison across parameter sweeps
-
-This version implements proportional allocation for the greedy half of resources.
+- Set-Aside Greedy: Greedy half = argmax sum log(u_{i,t}(z_t)) via sorting (Section 7.4), not proportional.
+- Fixed prediction: V_tilde_i set once at start (Paper 1); not updated each round.
+- Trust: Center observes each agent alpha_j(t); beta_j(t) = sum alpha_j (cumulative). Center detects (no NxN voting).
 """
 
 # ============================================================================
@@ -68,18 +58,14 @@ xi0_default = 0.01
 # This is the default when not doing sensitivity analysis
 
 gamma = 0.1
-# Threshold growth exponent
-# Detection threshold at time t: xi_t = xi0 * (t+1)^gamma
-# gamma controls how quickly the threshold grows over time
-# gamma=0.1 means slow growth (threshold stays relatively strict)
-# Formula: xi_t = xi0 * (t+1)^0.1
-# Example: If xi0=0.01, at t=9: xi_9 = 0.01 * 10^0.1 ≈ 0.0126
+# (Legacy: was used for xi_t = xi0*(t+1)^gamma; now Paper 2 formula used, gamma kept for API compat.)
 
-alpha_pairwise = 5.0
-# Pairwise similarity scaling factor
-# Used in trust detection: beta_ij = exp(-alpha * |difference_ij|)
-# Higher alpha = more sensitive to differences (stricter similarity requirement)
-# Lower alpha = more lenient (agents can differ more and still be considered similar)
+# Paper 2 Assumption 4: xi_t = xi0 * sqrt((1+epsilon)*(t+1)*ln(t+2))
+epsilon_default = 0.1
+
+# Trust detection uses alpha/beta (Paper 2); alpha can be dynamic (from distortion) or precomputed.
+# The constants below are used for the α stream (good vs malicious).
+# (Legacy: alpha_pairwise was used in the old report-similarity beta; no longer used.)
 
 # ============================================================================
 # SENSITIVITY ANALYSIS PARAMETERS
@@ -338,63 +324,117 @@ def offline_optimal_nsw(v_true, agent_mask=None):
 
 
 # ============================================================================
+# GREEDY ALLOCATION (Paper 1, Section 7.4) - Minimize predicted price, balance marginal ratios
+# ============================================================================
+
+def compute_greedy_allocation_paper1_sec74(predicted_util, reported_round, eligible_mask, budget=0.5):
+    """
+    Greedy-half: find z_t that minimizes predicted price (Paper 1 Section 7.4).
+    Equivalent to max sum_i log(u_pred_i + v_i*z_i). Sort by v_{i,t}/u_pred_{i,t}(0) descending;
+    allocate to balance marginal ratios (water-filling).
+
+    Parameters:
+        predicted_util: (N,) predicted utility u_pred_i (e.g. u_greedy + V_tilde/(2N))
+        reported_round: (N,) reported valuations v_i this round
+        eligible_mask: (N,) boolean; only eligible agents can receive positive allocation
+        budget: total budget to allocate (default 0.5)
+
+    Returns:
+        z: (N,) allocation; sum(z) = budget, z[~eligible] = 0
+    """
+    N = predicted_util.size
+    z = np.zeros(N)
+    eligible_idx = np.where(eligible_mask)[0]
+    if len(eligible_idx) == 0:
+        return z
+    u = np.maximum(predicted_util[eligible_idx].astype(float), 1e-10)
+    v = np.maximum(reported_round[eligible_idx].astype(float), 0.0)
+
+    # Only agents with v > 0 contribute; others get 0
+    positive = v > 1e-12
+    if not np.any(positive):
+        # All reported 0: split budget evenly among eligible
+        n_el = len(eligible_idx)
+        for i, idx in enumerate(eligible_idx):
+            z[idx] = budget / n_el
+        return z
+
+    # Restrict to eligible agents with v > 0
+    idx_pos = eligible_idx[positive]
+    u_pos = u[positive]
+    v_pos = v[positive]
+    n_pos = len(idx_pos)
+    if n_pos == 1:
+        z[idx_pos[0]] = budget
+        return z
+
+    # Sort by r_i = v_i / u_pred_i descending (highest ratio first)
+    ratio = v_pos / u_pos
+    order = np.argsort(-ratio)
+    u_sorted = u_pos[order]
+    v_sorted = v_pos[order]
+    idx_sorted = idx_pos[order]
+
+    # Find largest k such that w = (budget + S_k) / k >= u_sorted[k-1]/v_sorted[k-1]
+    S = 0.0
+    k_star = 0
+    for k in range(1, n_pos + 1):
+        i = k - 1
+        S += u_sorted[i] / v_sorted[i]
+        w = (budget + S) / k
+        if w >= u_sorted[i] / v_sorted[i]:
+            k_star = k
+        else:
+            break
+
+    if k_star <= 0:
+        # Fallback: give all budget to first agent
+        z[idx_sorted[0]] = budget
+        return z
+
+    S_star = sum(u_sorted[j] / v_sorted[j] for j in range(k_star))
+    w_final = (budget + S_star) / k_star
+    for j in range(k_star):
+        z[idx_sorted[j]] = max(0.0, w_final - u_sorted[j] / v_sorted[j])
+    # Remaining eligible (j >= k_star) stay 0; sum(z) = budget by construction
+    total = z.sum()
+    if abs(total - budget) > 1e-10:
+        z[eligible_mask] = z[eligible_mask] * (budget / total)
+    return z
+
+
+# ============================================================================
 # ONLINE SET-ASIDE GREEDY ALGORITHM
 # ============================================================================
 
 def online_set_aside_with_trust(v_true, reports_func_for_malicious, detect_fn, 
                                 remove_detected=True, trust_indices=None, 
-                                xi0_param=None, gamma_param=None):
+                                xi0_param=None, gamma_param=None, epsilon_param=None, predicted_V_fixed=None):
     """
-    Online resource allocation using Set-Aside Greedy algorithm with trust detection.
+    Online resource allocation using Set-Aside Greedy (Algorithm 1, Paper 1) with trust detection.
     
-    Algorithm Overview:
-        Each round t:
-            1. Agents report valuations (trustworthy report truth, malicious distort)
-            2. Run detection algorithm to identify suspicious agents
-            3. Allocate resources using Set-Aside Greedy:
-               - 50% uniform allocation (guarantee)
-               - 50% greedy allocation (efficiency)
-            4. Update cumulative utilities
+    Greedy half: Set-Aside Greedy = argmax Σ_i log(ũ_{i,t}(z_t)) via sorting (Section 7.4), not proportional.
+    predicted_V_fixed: if provided, Ṽ_i is fixed for all t (Paper 1); else not used (caller must pass).
     
-    Set-Aside Greedy Strategy:
-        - Uniform half: Guarantees each eligible agent gets at least 0.5/n_eligible
-        - Greedy half: Proportional allocation based on priorities (reported value / predicted utility)
-        - Proportional allocation distributes resources proportionally to reported values relative to predicted utilities
-        - Balances fairness (uniform) with efficiency (proportional allocation)
+    Trust: Center-only vector α_j(t), β_j(t); Center detects, no N×N voting.
     
     Parameters:
-        v_true: numpy array of shape (N_all, T)
-                True valuations (used to compute actual utilities)
-        reports_func_for_malicious: function(i, t, v_true) → reported value
-                                    If None, all agents report truthfully
-        detect_fn: function(reports_history, xi0, gamma) → (detected_mask, beta, xi_t)
-                   Detection algorithm (can be None to skip detection)
-        remove_detected: bool
-                         If True, detected agents get zero uniform allocation
-        trust_indices: numpy array, optional
-                       If provided, only compute NSW for these agents (fair comparison)
-        xi0_param: float, optional
-                   Detection threshold parameter (for sensitivity analysis)
-        gamma_param: float, optional
-                     Threshold growth parameter (for sensitivity analysis)
+        v_true: (N_all, T) true valuations
+        reports_func_for_malicious: reporting function (or None)
+        detect_fn: (reports_history, xi0, gamma, epsilon) -> (detected, beta, xi_t); beta (N,).
+        remove_detected, trust_indices, xi0_param, gamma_param, epsilon_param: as before
+        predicted_V_fixed: (N_all,) optional. Fixed V_tilde_i for all t (Paper 1); required for correct setup.
     
     Returns:
-        u_total: numpy array of shape (N_all,), total utilities for all agents
-        nsw_online: scalar, Nash Social Welfare (only for trustworthy agents if trust_indices provided)
-        detected: numpy array of shape (N_all,), boolean mask of detected agents
-    
-    Key Variables:
-        x[i,t]: Uniform allocation to agent i at time t
-        y[i,t]: Greedy allocation to agent i at time t
-        z[i,t]: Total allocation = x[i,t] + y[i,t]
-        u_greedy[i]: Cumulative utility from greedy allocations up to current round
-        reported_cum: Matrix of cumulative reported values (for detection)
+        u_total, nsw_online, detected
     """
     # Use parameter values if provided, otherwise use defaults
     if xi0_param is None:
         xi0_param = xi0_default
     if gamma_param is None:
         gamma_param = gamma
+    if epsilon_param is None:
+        epsilon_param = epsilon_default
     
     N_all = v_true.shape[0]
     # Total number of agents (trustworthy + malicious)
@@ -447,7 +487,7 @@ def online_set_aside_with_trust(v_true, reports_func_for_malicious, detect_fn,
         
         # Step 3: Run detection algorithm
         if detect_fn is not None:
-            detected_mask, beta, xi_t = detect_fn(reported_cum, xi0=xi0_param, gamma=gamma_param)
+            detected_mask, beta, xi_t = detect_fn(reported_cum, xi0=xi0_param, gamma=gamma_param, epsilon=epsilon_param)
             # detected_mask: boolean array, True for agents flagged as malicious
             # beta: similarity matrix, beta[i,j] = similarity between agents i and j
             # xi_t: current detection threshold
@@ -458,108 +498,35 @@ def online_set_aside_with_trust(v_true, reports_func_for_malicious, detect_fn,
                 any_detected_ever = True
                 # Mark that detection has found something (for conditional weighting)
         else:
-            # No detection → treat all as trustworthy
             detected = np.zeros(N_all, dtype=bool)
-            beta = np.ones((N_all, N_all))
-            # Full similarity matrix (all agents trust each other)
+            beta = np.ones(N_all)
             xi_t = 0.0
 
-        # Step 4: Uniform half allocation
+        # Step 4: Uniform half allocation (Paper 1 Set-Aside + Paper 2: cut off detected)
+        # Promise 1/(2N) per agent; detected agents get 0 (no resource to malicious). Option 1: do not redistribute.
+        x[:, t] = 0.5 / N_all
+        x[detected, t] = 0.0   # Cut off detected agents completely (uniform = 0, greedy already 0 via eligible)
         eligible = ~detected if remove_detected else np.ones(N_all, dtype=bool)
-        # eligible[i] = True if agent i is eligible for allocation
-        # If remove_detected=True: eligible = not detected (exclude flagged agents)
-        # If remove_detected=False: all agents eligible
-        
         n_eligible = max(1, eligible.sum())
-        # Number of eligible agents (at least 1 to avoid division by zero)
-        
-        x[eligible, t] = 0.5 / n_eligible
-        # Uniform allocation: each eligible agent gets 0.5 / n_eligible
-        # Total uniform allocation = n_eligible * (0.5/n_eligible) = 0.5 ✓
-        
-        x[~eligible, t] = 0.0
-        # Detected agents get zero uniform allocation
 
-        # Step 5: Compute predicted utilities for greedy allocation
-        reported_total_est = reported_cum.sum(axis=1) if reported_cum.ndim > 1 else reported_cum
-        # Sum across time (columns) → total reported value so far for each agent
-        # Shape: (N_all,)
-        
-        predicted_Vi = (reported_total_est / (t + 1)) * T
-        # Estimate of agent i's total valuation over all T rounds
-        # Formula: predicted_Vi = (average_so_far) * T
-        # Example: If agent reported 0.1 per round for 3 rounds:
-        #          predicted_Vi = (0.3 / 3) * 10 = 1.0
-        
+        # Step 5: Predicted utility (Paper 1: V_tilde is fixed input at t=0, never updated from reports)
+        if predicted_V_fixed is not None:
+            predicted_Vi = np.asarray(predicted_V_fixed, dtype=float).flatten()
+        else:
+            predicted_Vi = np.ones(N_all) / N_all
         predicted_util = u_greedy + predicted_Vi / (2 * N_all)
-        # Predicted total utility = current greedy utility + predicted guarantee
-        # predicted_Vi / (2*N_all) estimates utility from uniform half
-        # This is used to compute priority (reported_value / predicted_util)
 
-        # Step 6: Compute priorities for proportional allocation
-        # Proportional allocation: Allocate proportionally to reported values / predicted utilities
-        # Priority = reported_value / predicted_utility
-        priority = np.zeros(N_all)
-        # Priority determines proportional allocation
-        
-        # Compute priorities (may crash if predicted_util is zero)
-        denom = predicted_util.copy()
-        priority[eligible] = reported_round[eligible] / denom[eligible]
-        # Priority formula: priority[i] = reported_value[i] / predicted_util[i]
-        # Higher priority → higher allocation in proportional distribution
-        # Note: If denom[eligible] contains zeros, this will produce inf/nan (visible in plots as crashes)
-        
-        # Step 7: Apply trust weighting (conditional)
-        if detect_fn is not None and any_detected_ever:
-            # Only apply trust weighting if detection has found malicious agents
-            # This prevents performance degradation when detection is blind
-            
-            incoming_trust = beta.mean(axis=0)
-            # Average incoming trust: trust[j] = (1/N) * Σ_i beta[i,j]
-            # Measures how much other agents trust agent j
-            # Higher value → more trusted → higher priority
-            
-            priority = priority * incoming_trust
-            # Weight priorities by trust scores
-            # Agents with low trust get reduced priority (less greedy allocation)
-        
-        # Step 8: Proportional allocation (greedy half = 0.5)
-        # Proportional allocation: Allocate proportionally to priorities
-        # Simple approach: allocation[i] = 0.5 * (priority[i] / Σ_j priority[j])
-        y[:, t] = 0.0
-        # Initialize greedy allocation to zero
-        
-        if n_eligible > 0:
-            # Get eligible agents
-            eligible_indices = np.where(eligible)[0]
-            eligible_priority = priority[eligible_indices]
-            
-            # Compute total priority (may be zero, which will cause crash)
-            total_priority = eligible_priority.sum()
-            # Note: If total_priority is zero, division will produce inf/nan (visible in plots as crashes)
-            
-            # Proportional allocation: Allocate proportionally to priorities
-            # Simple formula: allocation[i] = 0.5 * (priority[i] / Σ_j priority[j])
-            if total_priority > 0:
-                for idx in eligible_indices:
-                    y[idx, t] = 0.5 * (priority[idx] / total_priority)
-                    # Proportional allocation: allocation proportional to priority
-                    # This distributes resources based on reported values relative to predicted utilities
-            else:
-                # Fallback: uniform allocation if all priorities are zero
-                y[eligible_indices, t] = 0.5 / n_eligible
-        
-        # Verify total allocation equals 0.5 (should be exact, but check for numerical precision)
+        # Step 6: (Marginal utilities not needed: solve_eisenberg_gale_greedy uses u_pred and v directly.)
+
+        # Step 7: Set-Aside Greedy (Paper 1 Section 7.4): minimize predicted price, balance marginal ratios
+        y[:, t] = compute_greedy_allocation_paper1_sec74(predicted_util, reported_round, eligible, budget=0.5)
         total_allocated = y[:, t].sum()
         if abs(total_allocated - 0.5) > 1e-10:
-            # Normalize if needed (shouldn't happen, but safety check)
             y[:, t] = y[:, t] * (0.5 / total_allocated)
-        # Proportional allocation complete: Total greedy allocation = 0.5 ✓
-        # Step 10: Update cumulative greedy utility
-        u_greedy += v_true[:, t] * y[:, t]
-        # Use TRUE valuations (not reported) to compute actual utility
-        # Formula: u_greedy[i] += v_true[i,t] * y[i,t]
-        # Note: If v_true contains zeros, utilities may become zero (will show as NaN in NSW)
+        # Step 8: Update cumulative greedy utility (algorithm uses REPORTS only, Paper 1 online)
+        u_greedy += reported_round * y[:, t]
+        # Center does not know v_true; it uses reported values for allocation state.
+        # Final evaluation u_total = (v_true * z).sum(axis=1) uses true valuations for NSW metric only.
 
         # Step 11: Compute total allocation
         z[:, t] = x[:, t] + y[:, t]
@@ -586,129 +553,105 @@ def online_set_aside_with_trust(v_true, reports_func_for_malicious, detect_fn,
 
 
 # ============================================================================
-# TRUST-BASED DETECTION ALGORITHM
+# TRUST-BASED DETECTION (Paper 2: Exogenous alpha, CUMULATIVE beta, Paper 2 threshold)
 # ============================================================================
+#
+# Paper 2 Eq. (9): beta_i(t) = sum_{k=0}^t alpha_i(k). CUMULATIVE SUM from t=0, no reset.
+# Alpha is EXOGENOUS (side information): Center does not know v_true; trust from separate channel.
+# In simulation: good agents alpha in [0.7,1.0], malicious in [0.0,0.4] (pre-generated or by type).
+# Threshold (Paper 2 Assumption 4): xi_t = xi0 * sqrt((1+epsilon)*(t+1)*ln(t+2)).
+# Detection: RELATIVE. detected_j = (max_beta - beta_j > xi_t).
+#
 
-def detect_malicious_from_reports(reports_history, xi0=0.1, gamma=0.7):
+ALPHA_GOOD_MIN, ALPHA_GOOD_MAX = 0.7, 1.0
+ALPHA_MAL_MIN, ALPHA_MAL_MAX = 0.0, 0.4
+
+
+def threshold_paper2(t, xi0, epsilon=0.1):
+    """Paper 2 Assumption 4: xi_t = xi0 * sqrt((1+epsilon)*(t+1)*ln(t+2)). ln(t+2) avoids zero at t=0."""
+    return xi0 * math.sqrt((1.0 + epsilon) * (t + 1) * math.log(t + 2))
+
+
+def generate_alpha_true(N_all, T, mal_indices, seed=None):
     """
-    Detect malicious agents using pairwise similarity analysis.
-    
-    Algorithm:
-        1. Compute pairwise differences in reported values
-        2. Convert differences to similarity scores (beta matrix)
-        3. For each agent, find their "most trusted neighbor"
-        4. Define cutoff threshold based on neighbor's trust
-        5. Count how many agents trust each agent
-        6. Flag agents trusted by fewer than half as malicious
-    
-    Key Insight:
-        Trustworthy agents report similar values → high similarity → trusted by many
-        Malicious agents report distorted values → low similarity → trusted by few
-    
-    Parameters:
-        reports_history: numpy array of shape (N_all, t_current)
-                         Cumulative reported values up to current round
-                         reports_history[i, t] = agent i's reported value at round t
-        xi0: float
-             Initial detection threshold (stricter = lower value)
-        gamma: float
-               Threshold growth exponent
-    
-    Returns:
-        detected_malicious: numpy array of shape (N_all,), boolean
-                          True for agents flagged as malicious
-        beta: numpy array of shape (N_all, N_all)
-              Similarity matrix: beta[i,j] = similarity between agents i and j
-              Range: (0, 1], higher = more similar
-        xi_t: float
-              Current detection threshold at time t
-    
-    Formula Details:
-        Difference: diff_ij = mean(|reports_i - reports_j|)
-        Similarity: beta_ij = exp(-alpha * diff_ij)
-        Threshold: xi_t = xi0 * (t+1)^gamma
-        Cutoff: cutoff_i = max_j(beta_ij) - xi_t
-        Trust count: count_k = Σ_i I(beta_ik >= cutoff_i)
-        Detection: malicious_k = (count_k < N_all/2)
+    Pre-generate exogenous alpha matrix (N_all x T). Good agents high alpha, malicious low.
+    Pass to make_detect_fn_trust_observations(..., alpha_precomputed=alpha_true).
     """
-    N_all = reports_history.shape[0]
-    # Number of agents
-    
-    t_current = reports_history.shape[1] if reports_history.ndim > 1 else 1
-    # Current time period (number of rounds observed so far)
-    
-    # Step 1: Compute pairwise mean absolute differences
-    diffs = np.zeros((N_all, N_all))
-    # diffs[i,j] = mean absolute difference between agents i and j
-    
-    for i in range(N_all):
+    rng = np.random.RandomState(seed) if seed is not None else np.random.RandomState()
+    alpha_true = np.zeros((N_all, T))
+    mal_set = set(mal_indices) if mal_indices is not None else set()
+    for j in range(N_all):
+        for t in range(T):
+            if j in mal_set:
+                alpha_true[j, t] = rng.uniform(ALPHA_MAL_MIN, ALPHA_MAL_MAX)
+            else:
+                alpha_true[j, t] = rng.uniform(ALPHA_GOOD_MIN, ALPHA_GOOD_MAX)
+    return alpha_true
+
+
+def make_detect_fn_trust_observations(mal_indices, alpha_precomputed=None, seed=None):
+    """
+    Center-only trust. beta = CUMULATIVE SUM of alpha from k=0 to t (Paper 2 Eq. 9), no reset.
+    Alpha is exogenous (Center does not use v_true or reports to compute trust).
+    If alpha_precomputed is provided: use pre-generated (N x T) alpha matrix.
+    Else: fallback static random alpha by agent type (good high, mal low). Paper 2 threshold.
+    """
+    if alpha_precomputed is not None:
+        alpha_true = np.asarray(alpha_precomputed)
+        N_all, T_max = alpha_true.shape
+
+        def detect_fn(reports_history, xi0=0.1, gamma=0.7, epsilon=0.1):
+            t_current = reports_history.shape[1] if reports_history.ndim > 1 else 1
+            t = t_current - 1
+            # beta(t) = sum_{k=0}^t alpha(k); strictly cumulative, no reset
+            beta = alpha_true[:, : t + 1].sum(axis=1)
+            xi_t = threshold_paper2(t, xi0, epsilon)
+            max_beta = beta.max()
+            detected_malicious = (max_beta - beta > xi_t)
+            return detected_malicious, beta, xi_t
+
+        return detect_fn
+
+    # Fallback: static random alpha by agent type (exogenous); cumulative beta; Paper 2 threshold
+    rng = np.random.RandomState(seed) if seed is not None else np.random.RandomState()
+    state = {'cum_prev': None, 't_done': -1}
+
+    def _alpha_vec(N_all, mal_indices, s, rng):
+        a = np.zeros(N_all)
+        mal_set = set(mal_indices) if mal_indices is not None else set()
         for j in range(N_all):
-            diffs[i, j] = np.mean(np.abs(reports_history[i, :] - reports_history[j, :]))
-            # Mean absolute difference across all observed rounds
-            # Formula: diff_ij = (1/t) * Σ_t |reports_i[t] - reports_j[t]|
-            # Lower diff → agents report similar values → likely both trustworthy
-    
-    # Step 2: Convert differences to similarity scores
-    beta = np.exp(-alpha_pairwise * diffs)
-    # Similarity formula: beta_ij = exp(-alpha * diff_ij)
-    # Properties:
-    #   - If diff_ij = 0 (identical): beta_ij = exp(0) = 1 (perfect similarity)
-    #   - If diff_ij → ∞: beta_ij → 0 (no similarity)
-    #   - alpha controls sensitivity: higher alpha = steeper decay
-    
-    # Step 3: Compute time-varying threshold
-    t = t_current - 1
-    # Convert to 0-indexed time
-    
-    xi_t = xi0 * ((t + 1) ** gamma)
-    # Threshold formula: xi_t = xi0 * (t+1)^gamma
-    # Properties:
-    #   - At t=0: xi_0 = xi0 * 1^gamma = xi0
-    #   - As t increases: threshold grows (becomes more lenient)
-    #   - gamma controls growth rate:
-    #     * gamma=0: constant threshold
-    #     * gamma>0: increasing threshold (more lenient over time)
-    #     * gamma<0: decreasing threshold (stricter over time)
-    
-    # Step 4: Compute trusted neighbor sets
-    kept_counts = np.zeros(N_all, dtype=int)
-    # kept_counts[k] = number of agents who "keep" (trust) agent k
-    
-    for i in range(N_all):
-        row = beta[i, :]
-        # Similarity scores from agent i's perspective
-        # row[j] = how similar agent i thinks agent j is
-        
-        jstar = np.argmax(row)
-        # Agent j* that agent i trusts most (highest similarity)
-        
-        cutoff = row[jstar] - xi_t
-        # Cutoff threshold: most trusted neighbor's similarity minus threshold
-        # Agents with similarity >= cutoff are considered "trusted neighbors"
-        # Lower xi_t → higher cutoff → stricter (fewer neighbors trusted)
-        
-        kept = (row >= cutoff)
-        # Boolean array: kept[j] = True if agent i trusts agent j
-        # kept[j] = True if beta[i,j] >= (max_k beta[i,k] - xi_t)
-        
-        kept_counts += kept.astype(int)
-        # Count: for each agent j, increment count if agent i trusts j
-        # After loop: kept_counts[j] = number of agents who trust agent j
-    
-    # Step 5: Detect malicious agents
-    detected_malicious = (kept_counts < (N_all // 2))
-    # Detection rule: if fewer than half of agents trust you, you're malicious
-    # Rationale: trustworthy agents should be trusted by majority
-    # Malicious agents (reporting distorted values) will be trusted by few
-    
-    return detected_malicious, beta, xi_t
+            a[j] = rng.uniform(ALPHA_MAL_MIN, ALPHA_MAL_MAX) if j in mal_set else rng.uniform(ALPHA_GOOD_MIN, ALPHA_GOOD_MAX)
+        return a
+
+    def detect_fn(reports_history, xi0=0.1, gamma=0.7, epsilon=0.1):
+        N_all = reports_history.shape[0]
+        t = (reports_history.shape[1] if reports_history.ndim > 1 else 1) - 1
+        if state['cum_prev'] is None:
+            state['cum_prev'] = np.zeros(N_all)
+        # Cumulative sum from k=0 to t (Paper 2 Eq. 9); no reset
+        for s in range(state['t_done'] + 1, t + 1):
+            state['cum_prev'] += _alpha_vec(N_all, mal_indices, s, rng)
+        state['t_done'] = t
+        beta = state['cum_prev'].copy()
+        xi_t = threshold_paper2(t, xi0, epsilon)
+        detected_malicious = (beta.max() - beta > xi_t)
+        return detected_malicious, beta, xi_t
+
+    return detect_fn
+
+
+def detect_malicious_from_reports(reports_history, xi0=0.1, gamma=0.7, epsilon=0.1):
+    """Legacy: no detection when called directly."""
+    N_all = reports_history.shape[0]
+    t = reports_history.shape[1] - 1 if reports_history.ndim > 1 and reports_history.shape[1] > 0 else 0
+    return np.zeros(N_all, dtype=bool), np.ones(N_all), threshold_paper2(t, xi0, epsilon)
 
 
 # ============================================================================
 # MALICIOUS REPORTING FUNCTION
 # ============================================================================
 
-def malicious_report_func_factory(v_true, c_mal, mal_indices):
+def malicious_report_func_factory(v_true, c_mal, mal_indices, seed=None):
     """
     Factory function that creates a malicious reporting function.
     
@@ -722,7 +665,7 @@ def malicious_report_func_factory(v_true, c_mal, mal_indices):
             reported_value = v_true[i,t] * factor
     
     Example with c_mal=5.0:
-        - factor ∈ [0.2, 5.0]
+        - factor in [0.2, 5.0]
         - If v_true=1.0:
           * Under-report: reported = 0.2 (20% of true value)
           * Over-report: reported = 5.0 (500% of true value)
@@ -734,13 +677,14 @@ def malicious_report_func_factory(v_true, c_mal, mal_indices):
                Distortion multiplier (higher = more extreme distortion)
         mal_indices: list or array
                      Indices of malicious agents
+        seed: int, optional
+              If provided, fixes the random stream so version 1 and 2 see the same reports (fair comparison).
     
     Returns:
-        reports_func: function(i, t, v_true_inner) → reported value
+        reports_func: function(i, t, v_true_inner) -> reported value
     """
-    rng = np.random.RandomState()
-    # Local random number generator
-    # Ensures each trial gets independent randomness
+    rng = np.random.RandomState(seed) if seed is not None else np.random.RandomState()
+    # Seeded RNG when seed given → same dataset across version 1 and 2
 
     def reports_func(i, t, v_true_inner):
         """
@@ -774,7 +718,7 @@ def malicious_report_func_factory(v_true, c_mal, mal_indices):
 # ============================================================================
 
 def run_experiment_once(N_trust, N_mal, T, c_mal, detection_fn, 
-                        xi0_param=None, gamma_param=None, v_true_precomputed=None):
+                        xi0_param=None, gamma_param=None, v_true_precomputed=None, trial=None):
     """
     Run one complete experiment trial.
     
@@ -797,6 +741,8 @@ def run_experiment_once(N_trust, N_mal, T, c_mal, detection_fn,
         v_true_precomputed: numpy array, optional, pre-generated valuation matrix
                            If provided, uses this instead of generating new random data
                            This ensures fair comparison across different xi0 values
+        trial: int, optional
+               Trial index. If provided, seeds the report factory so version 1 and 2 use the same dataset.
     
     Returns:
         Dictionary with:
@@ -834,6 +780,14 @@ def run_experiment_once(N_trust, N_mal, T, c_mal, detection_fn,
     mal_idx = list(range(N_trust, N_all))
     # Indices N_trust to N_all-1 are malicious
     
+    # Fixed predicted total valuation V_tilde_i (Paper 1): input only, independent of reports
+    V_true_total = v_true.sum(axis=1)
+    rng_pred = np.random.RandomState(5000 + trial) if trial is not None else np.random.RandomState()
+    predicted_V_fixed = V_true_total * (1 + rng_pred.uniform(-0.15, 0.15, N_all))
+
+    # Trust/detection: exogenous alpha (pre-generated by agent type; Center does not use v_true).
+    alpha_true = generate_alpha_true(N_all, T, mal_idx, seed=(4000 + trial) if trial is not None else None)
+
     # Scenario: Offline Optimal (benchmark)
     nsw_offline, u_offline_full, Xopt = offline_optimal_nsw(
         v_true,
@@ -849,32 +803,41 @@ def run_experiment_once(N_trust, N_mal, T, c_mal, detection_fn,
     u_online_trustonly, nsw_online_trustonly, detected_dummy = \
         online_set_aside_with_trust(
             v_trustonly, None, detect_fn=None, remove_detected=False,
-            trust_indices=None, xi0_param=xi0_param, gamma_param=gamma_param
+            trust_indices=None, xi0_param=xi0_param, gamma_param=gamma_param,
+            predicted_V_fixed=predicted_V_fixed[:N_trust]
         )
     # Run online algorithm with only trustworthy agents
     # No malicious agents → no detection needed
     
     # Scenario B: Online Polluted WITHOUT Detection (baseline)
-    reports_func = malicious_report_func_factory(v_true, c_mal, mal_idx)
-    # Create reporting function with malicious distortion
+    report_seed_no_detect = (1000 + trial) if trial is not None else None
+    report_seed_with_detect = (2000 + trial) if trial is not None else None
+    reports_func = malicious_report_func_factory(v_true, c_mal, mal_idx, seed=report_seed_no_detect)
+    # Create reporting function with malicious distortion (seeded for fair comparison across v1/v2)
     
     u_online_all_no_detect, nsw_online_all_no_detect, detected_dummy2 = \
         online_set_aside_with_trust(
             v_true, reports_func, detect_fn=None, remove_detected=False,
-            trust_indices=trust_idx, xi0_param=xi0_param, gamma_param=gamma_param
+            trust_indices=trust_idx, xi0_param=xi0_param, gamma_param=gamma_param,
+            predicted_V_fixed=predicted_V_fixed
         )
     # Run online algorithm with malicious agents but NO detection
     # This is the baseline: how bad is it without detection?
     # trust_indices=trust_idx: only compute NSW for trustworthy agents
     
     # Scenario C: Online Polluted WITH Detection
-    reports_func2 = malicious_report_func_factory(v_true, c_mal, mal_idx)
-    # Create new reporting function (independent randomness)
+    # Detection: exogenous alpha (pre-generated), cumulative beta (Paper 2 Eq. 9), Paper 2 threshold.
+    detect_fn_trust = make_detect_fn_trust_observations(
+        mal_idx, alpha_precomputed=alpha_true, seed=(3000 + trial) if trial is not None else None
+    )
+    reports_func2 = malicious_report_func_factory(v_true, c_mal, mal_idx, seed=report_seed_with_detect)
+    # Seeded so version 1 and 2 see same report stream (fair comparison)
     
     u_online_all_with_detect, nsw_online_all_with_detect, detected_mask = \
         online_set_aside_with_trust(
-            v_true, reports_func2, detect_fn=detection_fn, remove_detected=True,
-            trust_indices=trust_idx, xi0_param=xi0_param, gamma_param=gamma_param
+            v_true, reports_func2, detect_fn=detect_fn_trust, remove_detected=True,
+            trust_indices=trust_idx, xi0_param=xi0_param, gamma_param=gamma_param,
+            predicted_V_fixed=predicted_V_fixed
         )
     # Run online algorithm with malicious agents AND detection
     # remove_detected=True: detected agents get zero uniform allocation
@@ -947,7 +910,7 @@ if RUN_SENSITIVITY_ANALYSIS:
                 result = run_experiment_once(
                     N_trust, N_mal, T, c_mal, detect_malicious_from_reports,
                     xi0_param=xi0_val, gamma_param=gamma,
-                    v_true_precomputed=v_true_fixed
+                    v_true_precomputed=v_true_fixed, trial=trial
                 )
                 results.append(result)
             except Exception as e:
@@ -1379,7 +1342,7 @@ else:
             print(f"Running trial {trial + 1}/{n_trials}...")
         
         try:
-            result = run_experiment_once(N_trust, N_mal, T, c_mal, detect_malicious_from_reports)
+            result = run_experiment_once(N_trust, N_mal, T, c_mal, detect_malicious_from_reports, trial=trial)
             results.append(result)
         except Exception as e:
             print(f"Error in trial {trial + 1}: {e}")
