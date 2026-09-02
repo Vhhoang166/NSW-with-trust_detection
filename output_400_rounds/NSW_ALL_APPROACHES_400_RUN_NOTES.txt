@@ -1,0 +1,24 @@
+{
+  "n_rounds": 400,
+  "n_trials_requested": 25,
+  "approaches": [
+    "baseline_fixed_alpha",
+    "adaptive_alpha",
+    "pace_trusted",
+    "generalized_mean_greedy",
+    "sample_resolving",
+    "expert_advice",
+    "robust_aggregation"
+  ],
+  "attacks": [
+    "byzantine",
+    "burst",
+    "reputation_poison",
+    "trust_mimicry"
+  ],
+  "cpu_only": true,
+  "execution_mode": "chunked one approach/attack at a time",
+  "offline_benchmark": "Frank-Wolfe approximation for same offline concave NSW objective; avoids SLSQP fallback-to-equal-allocation",
+  "errors": [],
+  "png_count": 69
+}

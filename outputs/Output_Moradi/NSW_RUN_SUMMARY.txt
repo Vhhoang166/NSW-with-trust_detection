@@ -1,0 +1,51 @@
+NSW_Moradi_Final.py CPU-only run summary
+=========================================
+
+Environment:
+- GPU disabled with CUDA_VISIBLE_DEVICES=''
+- Matplotlib backend: Agg
+- CPU execution used only
+
+Important execution note:
+- The original unmodified script was attempted first, but the full SLSQP-based offline NSW benchmark and repeated 25-trial sweeps exceeded the execution window before Phase 1 completed.
+- To obtain runnable outputs in this environment, I used a CPU-only accelerated wrapper that imports the original file and replaces only offline_optimal_nsw with a Frank-Wolfe solver for the same concave offline NSW objective.
+- Main focused attack results and plots 1-6, 9, 13, and 14 were generated with 25 trials.
+- Longer sweep plots were generated with smaller trial counts to finish in this environment:
+  - Plot 7: 5 trials
+  - Plots 8, 10, 11, 12, 15: 1 trial
+
+25-trial focused attack summary:
+- byzantine: NSW=2.5656, ratio=0.666, DR=100%, alg1F1=1.000, sparseF1=1.000, conv=5.0
+- burst: NSW=2.1640, ratio=0.562, DR=95%, alg1F1=0.971, sparseF1=1.000, conv=28.0
+- reputation_poison: NSW=1.9836, ratio=0.515, DR=0%, alg1F1=0.000, sparseF1=1.000, conv=192.0
+- trust_mimicry: NSW=1.9856, ratio=0.515, DR=0%, alg1F1=0.000, sparseF1=1.000, conv=88.1
+
+Prediction scenario stress test output from Plot 15, 1 trial:
+- mild_noise: NSW_ratio=0.642, min_util=2.1840, DR=100%
+- ideal: NSW_ratio=0.644, min_util=2.3247, DR=100%
+- severe_over: NSW_ratio=0.647, min_util=2.2733, DR=100%
+- severe_under: NSW_ratio=0.643, min_util=2.3312, DR=100%
+- asymmetric_outlier: NSW_ratio=0.652, min_util=2.3595, DR=100%
+- adversarial: NSW_ratio=0.644, min_util=2.2246, DR=100%
+- random_permutation: NSW_ratio=0.644, min_util=2.2679, DR=100%
+- half_over_half_under: NSW_ratio=0.624, min_util=2.0376, DR=100%
+
+Generated plots:
+- outputs/plot1_main_results.png
+- outputs/plot2_utility_traj.png
+- outputs/plot3_alloc_heatmap.png
+- outputs/plot4_misclass.png
+- outputs/plot5_attack_comparison.png
+- outputs/plot6_beta_trajectories.png
+- outputs/plot7_nsw_ratio.png
+- outputs/plot8_alpha_sweep.png
+- outputs/plot9_three_way_detector.png
+- outputs/plot10_sigma_sweep.png
+- outputs/plot11_compound_breakdown.png
+- outputs/plot12_reputation_poison_phases.png
+- outputs/plot13_utility_moradi_byzantine.png
+- outputs/plot13_utility_moradi_burst.png
+- outputs/plot13_utility_moradi_reputation_poison.png
+- outputs/plot13_utility_moradi_trust_mimicry.png
+- outputs/plot14_attack_rates.png
+- outputs/plot15_prediction_scenarios.png

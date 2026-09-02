@@ -1,58 +1,58 @@
-# Nash Social Welfare (NSW) Maximization with Trust-Based Malicious Detection
+# NSW With Trust Detection
 
-Online resource allocation with Nash Social Welfare objective and trust-based detection of malicious agents. Implements and extends ideas from **"Online Nash Social Welfare Maximization with Predictions"** with malicious agents and detection.
+This repository studies online Nash social welfare allocation under strategic reporting attacks and trust filtering.
 
-## Overview
+The current project focus is the allocation-side comparison built around `NSW_Moradi_Final.py`: fixed-alpha set-aside allocation, adaptive-alpha allocation, paper-inspired allocation variants, expert-advice control, and trust-mode ablations.
 
-- **Version 1**: Proportional allocation (greedy half allocated by reported value / predicted utility).
-- **Version 2**: Water-filling allocation (iterative equalization of marginal utilities, with trust weighting).
-- **Version 0**: Baseline prototype (reference only).
+## Main Files
 
-Experiments compare detection effectiveness (Option 1: vs offline ideal; Option 2: vs online clean) and plot utility trajectories over time.
+- `NSW_Moradi_Final.py` - main Moradi-final simulator and baseline trust-aware allocation code.
+- `NSW_Only.py` - NSW-only/reference simulation code.
+- `scripts/run_report_extra_experiments.py` - runner for the full trust-mode and allocation-variant benchmark.
+- `scripts/report_extra_approaches/` - maintained modular implementations for the report benchmark variants.
+- `scripts/build_trust_aware_report.py` - builds the final HTML and DOCX manuscript from completed CSV outputs.
 
-## Requirements
+## Reports
 
-- Python 3.7+
-- NumPy
-- SciPy
-- Matplotlib
+- `docs/trust_aware_online_nsw_manuscript.html` - current HTML manuscript.
+- `docs/trust_aware_online_nsw_report.docx` - current DOCX report.
+- `docs/combined_full_4500_summary/` - full 4,500-trial summary tables and the five primary report figures.
+
+## Output Folders
+
+- `output_400_rounds/` - earlier 400-round all-approach benchmark outputs, plots, trial CSVs, and source snapshots.
+- `outputs/Output_Moradi/` - legacy Moradi-focused run logs and outputs.
+- `archive/` - duplicate or older materials kept for provenance but removed from the root project view.
+
+## Typical Workflow
+
+Run extra experiments on a stronger CPU machine. If you use the local project environment, call:
 
 ```bash
-pip install numpy scipy matplotlib
+.venv-report-extra/bin/python scripts/run_report_extra_experiments.py --help
 ```
 
-Or use the provided requirements file:
+Rebuild the report from existing outputs:
 
 ```bash
-pip install -r requirements.txt
+.venv-report-extra/bin/python scripts/build_trust_aware_report.py
 ```
 
-## How to Run
+If you use a fresh environment instead, install the dependencies first:
 
-**Sensitivity analysis (parameter sweep over xi0, generates plots):**
 ```bash
-python "nsw with trust version 1.py"
-python "nsw with trust version 2.py"
-```
-Both scripts use the same random seeds per trial, so detection-rate curves match; only allocation (proportional vs water filling) differs.
-
-**Utility trajectories (time-series of cumulative utility, uses optimal xi0):**
-```bash
-python utility_trajectories_version1.py   # xi0 = 0.29
-python utility_trajectories_version2.py  # xi0 = 0.27
+python -m pip install -r requirements_report_extra.txt
 ```
 
-## Outputs
+The report builder expects the main full-benchmark CSVs in:
 
-- `option1_detection_effectiveness_version1.png`, `option2_detection_effectiveness_version1.png`, `detection_rate_reference_version1.png`
-- Same set for version 2
-- `utility_trajectories_over_time_version1.png`, `utility_trajectories_over_time_version2.png`
+```text
+docs/combined_full_4500_summary/full_4500_cell_summary.csv
+docs/combined_full_4500_summary/full_4500_trial_summary.csv
+```
 
-## Parameters
+## Notes
 
-- **Optimal xi0**: Version 1 = 0.29, Version 2 = 0.27 (Option 2, non-crashed region).
-- Main globals: `N_trust`, `N_mal`, `T`, `c_mal`, `gamma`, `alpha_pairwise`; see script headers.
-
-## Documentation
-
-See `COMPARISON_V0_V1_V2.md` for a detailed comparison of Version 0, 1, and 2 (allocation, methodology, and usage).
+- Root-level `approach_*.py` files from the older 400-round runner were duplicate source snapshots. They are archived under `archive/legacy_400_round_source/`.
+- Duplicate root-level 400-round summary CSVs are archived under `archive/root_duplicate_outputs/`; the active copies remain in `output_400_rounds/`.
+- Old rendered report draft folders are archived under `docs/archive/rendered_report_drafts/`.

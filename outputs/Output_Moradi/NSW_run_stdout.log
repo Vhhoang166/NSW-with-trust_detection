@@ -1,0 +1,24 @@
+========================================================================
+NSW TRUSTWORTHY CONSENSUS — Professor Revision
+  [R1] Line plots   [R2] 4 focused attacks  [R3] Poison redesign
+  [R4] Compound     [R5] Full information   [R6] Deep analysis
+  [R7] Higher rates [R8] 3-part structure   [R9] Expanded docs
+========================================================================
+
+[Phase 1] Running all four focused attack types (25 trials each) ...
+  byzantine           NSW=2.5656  ratio=0.666  DR=100%  alg1F1=1.000  sparseF1=1.000  conv=5.0
+  burst               NSW=2.1640  ratio=0.562  DR=95%  alg1F1=0.971  sparseF1=1.000  conv=28.0
+  reputation_poison   NSW=1.9836  ratio=0.515  DR=0%  alg1F1=0.000  sparseF1=1.000  conv=192.0
+  trust_mimicry       NSW=1.9856  ratio=0.515  DR=0%  alg1F1=0.000  sparseF1=1.000  conv=88.1
+
+[Plots 1-5] Main diagnostic plots ...
+  -> /mnt/data/outputs/plot1_main_results.png
+  -> /mnt/data/outputs/plot2_utility_traj.png
+  -> /mnt/data/outputs/plot3_alloc_heatmap.png
+  -> /mnt/data/outputs/plot4_misclass.png
+  -> /mnt/data/outputs/plot5_attack_comparison.png
+
+[Plot 6] β accumulation and detection threshold ...
+  -> /mnt/data/outputs/plot6_beta_trajectories.png
+
+[Plot 7] NSW ratio sensitivity to adversary count ...

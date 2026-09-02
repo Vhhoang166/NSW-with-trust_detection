@@ -6,6 +6,7 @@ __pycache__/
 # Virtual environments
 venv/
 .venv/
+.venv-report-extra/
 env/
 .env
 
@@ -16,6 +17,15 @@ env/
 *.swp
 *.swo
 
+# Generated document render scratch folders
+docs/rendered_*/
+docs/archive/rendered_report_drafts/
+docs/**/quicklook_pages/
+docs/**/quicklook_selected/
+docs/**/selected_pages/
+docs/**/ql_test/
+docs/**/sips_test/
+
 # Jupyter
 .ipynb_checkpoints/
 
@@ -24,4 +34,3 @@ build/
 dist/
 *.egg-info/
 *.egg
-
