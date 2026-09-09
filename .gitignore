@@ -18,6 +18,7 @@ env/
 *.swo
 
 # Generated document render scratch folders
+.report_build/
 docs/rendered_*/
 docs/archive/rendered_report_drafts/
 docs/**/quicklook_pages/

@@ -1,6 +1,6 @@
 # Docs
 
-This folder contains the current report, supporting summaries, and archived render drafts.
+This folder contains the current report, supporting summaries, and background notes.
 
 ## Current Report
 
@@ -18,7 +18,4 @@ This folder contains the current report, supporting summaries, and archived rend
 - `NSW_Moradi_Changes.md`
 - `NSW_Moradi_ver2_Explanation.md`
 - `GitHub_Basics_Guide.md`
-
-## Archive
-
-- `archive/rendered_report_drafts/` - older rendered PDF/page-image draft folders from prior report iterations.
+- `offline_solver_comparison_500_rounds.md`
